@@ -10,7 +10,7 @@ app.use(express.json());
 
 const mainPort = process.env.MAIN_PORT || 80; // get app port from the config, otherwise use the default 80
 
-async function tokens() { //* a hurrendous way to get/store access & refresh tokens, yes it works, no i will not touch it again unless required
+async function tokens() { //* a hurrendous way to get/store access & refresh tokens, yes it works, no i will not touch it again unless required, also: hello log spam
     var tokens = '';
     var file = await fs.open(path.join(__dirname, '/tokens.cfg'), 'r+'); // open the tokens file
     var storedTokens = (await file.readFile()).toString(); // read the file and format it appropriately
@@ -44,13 +44,14 @@ async function get_access_token(code, file) {
             "redirect_uri": "https://seasnail-vast-monitor.ngrok-free.app"
             }
     });
-    ret = {access_token: response.data.access_token, refresh_token: response.data.refresh_token, expires_in: response.data.expires_in, obtained_at: Date.now()};
+    ret = {access_token: response.data.access_token, refresh_token: response.data.refresh_token, expires_in: response.data.expires_in * 10, obtained_at: Date.now()};
     console.log(`Authorised, storing data`);
     file.writeFile(JSON.stringify(ret));
     return ret;
 }
 
 async function refresh_tokens(token) {
+    console.log(`Refreshing access token...`);
     var file = await fs.open(path.join(__dirname, '/tokens.cfg'), 'r+');
     response = await axios.request({
         method: 'POST',
@@ -59,11 +60,11 @@ async function refresh_tokens(token) {
             "client_id": process.env.CRM_INTEGRATION_ID,
             "client_secret": process.env.CRM_SECRET,
             "grant_type": "refresh_token",
-            "refresh_token": token,
+            "refresh_token": token.refresh_token,
             "redirect_uri": "https://seasnail-vast-monitor.ngrok-free.app"
             }
     });
-    ret = {access_token: response.data.access_token, refresh_token: response.data.refresh_token, expires_in: response.data.expires_in, obtained_at: Date.now()};
+    ret = {access_token: response.data.access_token, refresh_token: response.data.refresh_token, expires_in: response.data.expires_in * 10, obtained_at: Date.now()};
     file.writeFile(JSON.stringify(ret));
     file.close();
     return ret;
@@ -71,7 +72,7 @@ async function refresh_tokens(token) {
 
 async function contacts(req, res) { //* this function is hell, i probably should split it up
     var params = req.query;
-    var all_tokens = tokens();
+    var all_tokens = JSON.parse(await tokens());
     if (params.name == null){
         res.status(400).json({status: 400, msg: `Required field name is missing`});
     } else if (params.email == null) {
@@ -79,42 +80,42 @@ async function contacts(req, res) { //* this function is hell, i probably should
     } else if(params.phone == null) {
         res.status(400).json({status: 400, msg: `Required field phone is missing`});
     } else if (params.name != null && params.phone != null && params.email != null){
-        if (all_tokens.obtained_at + all_tokens.expires_in < Date.now()){
-            all_tokens = refresh_tokens(all_tokens.refresh_token);
+        if ((all_tokens.obtained_at + all_tokens.expires_in) <= Date.now()){
+            all_tokens = await refresh_tokens(all_tokens);
         }
         var data = (await axios.request({
             method: 'GET',
             url: 'https://theexp.amocrm.ru/api/v4/contacts',
-            headers: {Authentication: `Bearer ${all_tokens.access_token}`},
+            headers: {Authorization: `Bearer ${all_tokens.access_token}`},
             params: {
                 query: params.phone
                 }
         })).data;
-        if (data == null) {
+        if (data == '') {
             data = (await axios.request({
                 method: 'GET',
                 url: 'https://theexp.amocrm.ru/api/v4/contacts',
-                headers: {Authentication: `Bearer ${all_tokens.access_token}`},
+                headers: {Authorization: `Bearer ${all_tokens.access_token}`},
                 params: {
                     query: params.name
                     }
             })).data;
         }
-        if (data == null) {
+        if (data == '') {
             data = (await axios.request({
                 method: 'GET',
                 url: 'https://theexp.amocrm.ru/api/v4/contacts',
-                headers: {Authentication: `Bearer ${all_tokens.access_token}`},
+                headers: {Authorization: `Bearer ${all_tokens.access_token}`},
                 params: {
                     query: params.email
                     }
             })).data;
         }
-        if (data == null) {
-            axios.request({
+        if (data == '') {
+            data = (await axios.request({
                 method: 'POST',
                 url: 'https://theexp.amocrm.ru/api/v4/contacts',
-                headers: {Authentication: `Bearer ${all_tokens.access_token}`},
+                headers: {Authorization: `Bearer ${all_tokens.access_token}`},
                 data: {
                     name: params.name,
                     first_name: params.name.split(' ')[1],
@@ -144,19 +145,20 @@ async function contacts(req, res) { //* this function is hell, i probably should
                         }
                     ]
                     }
-            });
+            })).data;
         } else {
+            console.log(data);
             axios.request({
                 method: 'PATCH',
-                url: `https://theexp.amocrm.ru/api/v4/contacts/${data.id}`,
-                headers: {Authentication: `Bearer ${all_tokens.access_token}`},
+                url: `https://theexp.amocrm.ru/api/v4/contacts/${data._embedded.contacts[0].id}`,
+                headers: {Authorization: `Bearer ${all_tokens.access_token}`},
                 data: {
                     first_name: params.name.split(' ')[1],
                     last_name: params.name.split(' ')[0],
                     custom_fields_values: [
                         {
                             field_name: "Телефон",
-                            field_id: data.custom_fields_values[0].field_id,
+                            field_id: data._embedded.contacts[0].custom_fields_values[0].field_id,
                             field_type: "multitext",
                             values: [
                                 {
@@ -167,7 +169,7 @@ async function contacts(req, res) { //* this function is hell, i probably should
                         },
                         {
                             field_name: "Email",
-                            field_id: data.custom_fields_values[1].field_id,
+                            field_id: data._embedded.contacts[0].custom_fields_values[1].field_id,
                             field_type: "multitext",
                             values: [
                                 {
@@ -182,18 +184,21 @@ async function contacts(req, res) { //* this function is hell, i probably should
         }
         lead = (await axios.request({
             method: 'POST',
-            url: 'https://theexp.amocrm.ru/api/v4/leads',
-            headers: {Authentication: `Bearer ${all_tokens.access_token}`},
-            data: {
-                _embedded: {
-                    contacts: [{
-                        id: data.id
-                    }]
-                }
-            }
+            url: 'https://theexp.amocrm.ru/api/v4/leads/complex',
+            headers: {Authorization: `Bearer ${all_tokens.access_token}`},
+            data: 
+                [{
+                    "_embedded": {
+                        "contacts": [{
+                            "id": data._embedded.contacts[0].id
+                        }]
+                    }
+                }]
+            
         })).data;
-        res.json({code: 200, msg: `Сделка успешно создана`, lead_id: data.lead_id})
+        res.json({code: 200, msg: `Сделка успешно создана`, lead_id: lead[0].id})
     } else {
         res.json({code: 400, msg: `Отсутствует один или более параметров`})
     }
+    console.log(`Finished running the function!`)
 }
